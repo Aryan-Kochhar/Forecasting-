@@ -1,6 +1,9 @@
 ﻿"""Dashboard to look at the results.
 
-Run (after the 4 pipeline steps):  streamlit run dashboard/app.py
+It reads the small result files in dashboard/data (written by step 4), so it
+works without the raw Walmart data.
+
+Run:  streamlit run dashboard/app.py
 """
 
 import sys
@@ -11,46 +14,53 @@ import plotly.graph_objects as go
 import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-from config import LEAD_TIME, MARGIN, PROCESSED, REVIEW_DAYS, SERVICE_LEVELS, STORE
+from config import DASHBOARD_DATA, LEAD_TIME, MARGIN, REVIEW_DAYS, SERVICE_LEVELS
 from simulator import simulate
 
 st.set_page_config(page_title="Walmart inventory forecasting", layout="wide")
-NAMES = {"naive": "Naive", "normal": "Normal formula", "lgbm": "LightGBM"}
+NAMES = {"naive": "Naive", "normal": "Normal formula", "history": "Past-year quantile", "lgbm": "LightGBM"}
+SAFETY_METHODS = ["normal", "history", "lgbm"]     # the ones that have a service level
 
 
 @st.cache_data
-def load():
+def load(store):
+    folder = DASHBOARD_DATA / store
     return (
-        pd.read_parquet(PROCESSED / "sales.parquet"),
-        pd.read_parquet(PROCESSED / "prices.parquet"),
-        pd.read_parquet(PROCESSED / "test_forecasts.parquet"),
-        pd.read_csv(PROCESSED / "inventory_summary.csv"),
-        pd.read_csv(PROCESSED / "forecast_scores.csv"),
-        pd.read_csv(PROCESSED / "matched_comparison.csv"),
+        pd.read_parquet(folder / "sales.parquet"),
+        pd.read_parquet(folder / "prices.parquet"),
+        pd.read_parquet(folder / "test_forecasts.parquet"),
+        pd.read_csv(folder / "inventory_summary.csv"),
+        pd.read_csv(folder / "forecast_scores.csv"),
+        pd.read_csv(folder / "matched_comparison.csv"),
     )
 
 
-sales, prices, forecasts, summary, scores, matched = load()
+stores = sorted(p.name for p in DASHBOARD_DATA.iterdir() if p.is_dir())
+store = st.sidebar.selectbox("Store", stores)
+st.sidebar.caption("Each store has its own model, trained only on that store's history.")
+sales, prices, forecasts, summary, scores, matched = load(store)
 
-st.title(f"Walmart store {STORE}: forecast demand, then decide how much to stock")
+st.title(f"Walmart store {store}: forecast demand, then decide how much to stock")
 tab_results, tab_product = st.tabs(["Overall results", "Look at one product"])
 
 # ------------------------------------------------------------------ results
 with tab_results:
-    st.caption("26-week backtest on data the model never saw. Same store, same demand, three ways of deciding the stock level.")
+    st.caption("26-week backtest on data the model never saw. Same store, same demand, "
+               "four ways of deciding the stock level.")
     cols = st.columns(len(matched))
     for col, row in zip(cols, matched.itertuples()):
+        best_baseline = min(row.normal, row.history)   # compare against whichever baseline did better
         col.metric(
             f"Inventory needed for {row.fill_rate:.0%} fill rate",
             f"${row.lgbm:,.0f}",
-            f"{-row.saving:.1%} vs normal formula",
+            f"{row.lgbm / best_baseline - 1:.1%} vs best baseline (${best_baseline:,.0f})",
             delta_color="inverse",
         )
 
     left, right = st.columns(2)
 
     fig = go.Figure()
-    for method in ["normal", "lgbm"]:
+    for method in SAFETY_METHODS:
         part = summary[summary["method"] == method]
         fig.add_scatter(x=part["avg_inventory_value"], y=part["fill_rate"] * 100, mode="lines+markers",
                         name=NAMES[method], text=part["service_level"],
@@ -65,7 +75,7 @@ with tab_results:
     cov = scores.pivot(index="quantile", columns="method", values="coverage")
     fig = go.Figure()
     fig.add_scatter(x=[0.5, 1], y=[0.5, 1], mode="lines", name="Perfect", line=dict(dash="dash", color="gray"))
-    for method in ["normal", "lgbm"]:
+    for method in SAFETY_METHODS:
         fig.add_scatter(x=cov.index, y=cov[method], mode="lines+markers", name=NAMES[method])
     fig.update_layout(title="Are the forecasts honest? (calibration)",
                       xaxis_title="quantile we asked for", yaxis_title="how often demand was below it")
@@ -79,15 +89,16 @@ with tab_product:
     c1, c2, c3 = st.columns(3)
     top_sellers = forecasts.groupby("item_id")["actual"].sum().sort_values(ascending=False).index
     item = c1.selectbox("Product (best sellers first)", top_sellers)
-    method = c2.selectbox("Who decides the stock level", ["lgbm", "normal", "naive"], format_func=NAMES.get)
+    method = c2.selectbox("Who decides the stock level", ["lgbm", "history", "normal", "naive"],
+                          format_func=NAMES.get)
     level = c3.select_slider("Service level", SERVICE_LEVELS, value=0.95)
 
     f = forecasts[forecasts["item_id"] == item].sort_values("date")
-    days = sales.index[sales.index > f["date"].iloc[0]]
-    demand = sales.loc[days, [item]].to_numpy()
+    days = sales.index
+    demand = sales[[item]].to_numpy()
     r = simulate(demand, f[[f"{method}_{level}"]].to_numpy(), REVIEW_DAYS, LEAD_TIME)
 
-    price = float(prices.loc[days, item].mean())
+    price = float(prices[item].mean())
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Fill rate", f"{r['sold'].sum() / max(demand.sum(), 1):.1%}")
     m2.metric("Units lost to empty shelf", f"{r['lost'].sum():.0f}")
@@ -104,7 +115,7 @@ with tab_product:
     fig = go.Figure()
     fig.add_scatter(x=f["date"], y=f["actual"], name="What really sold in the next 10 days", mode="lines+markers")
     fig.add_scatter(x=f["date"], y=f["lgbm_0.5"], name="LightGBM middle guess (0.5)")
-    fig.add_scatter(x=f["date"], y=f[f"lgbm_{level}"], name=f"LightGBM {level} quantile", line=dict(dash="dot"))
-    fig.add_scatter(x=f["date"], y=f[f"normal_{level}"], name=f"Normal formula {level}", line=dict(dash="dot"))
+    for m in SAFETY_METHODS:
+        fig.add_scatter(x=f["date"], y=f[f"{m}_{level}"], name=f"{NAMES[m]} {level}", line=dict(dash="dot"))
     fig.update_layout(title="Forecast made on each ordering day vs. what happened", yaxis_title="units in next 10 days")
     st.plotly_chart(fig, width="stretch")
