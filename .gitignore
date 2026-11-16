@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# data is downloaded / generated, not stored in git
+data/raw/
+data/processed/
+models/
