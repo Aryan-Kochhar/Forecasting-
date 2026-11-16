@@ -5,9 +5,11 @@ We do NOT predict one number. For each product we predict several
 "there is a 90% chance demand will be at or below this number".
 That is exactly what a store needs to decide how much to stock.
 
-Three methods are compared:
+Four methods are compared:
   naive   : recent daily average x 10 days (no safety margin)
   normal  : textbook formula = average + z * standard deviation (bell-curve assumption)
+  history : look at every 10-day total from the past year and take its quantile
+            (no bell-curve assumption, so a tougher baseline to beat)
   lgbm    : LightGBM model trained to predict each quantile directly
 
 Run:  python src/step3_train_forecasts.py
@@ -21,6 +23,8 @@ import numpy as np
 import pandas as pd
 
 from config import FIGURES, HORIZON, PROCESSED, SERVICE_LEVELS
+
+METHODS = ["naive", "normal", "history", "lgbm"]
 
 FIGURES.mkdir(parents=True, exist_ok=True)
 
@@ -50,6 +54,17 @@ for q in SERVICE_LEVELS:
     z = NormalDist().inv_cdf(q)          # e.g. q = 0.95 -> z = 1.64
     preds[f"naive_{q}"] = avg_demand
     preds[f"normal_{q}"] = np.maximum(avg_demand + z * spread, 0)
+
+# "history" baseline: for each product, list the 10-day sales totals ending on
+# each of the last 364 days, and read the quantile straight off that list.
+sales = pd.read_parquet(PROCESSED / "sales.parquet")
+past_totals = sales.rolling(HORIZON).sum().iloc[-800:]   # only the recent part is needed
+for q in SERVICE_LEVELS:
+    table = past_totals.rolling(364, min_periods=28).quantile(q)
+    long = table.stack().rename("value").reset_index()
+    long.columns = ["date", "item_id", "value"]
+    merged = test[["date", "item_id"]].merge(long, on=["date", "item_id"], how="left")
+    preds[f"history_{q}"] = merged["value"].fillna(0).to_numpy()
 
 # ---------- LightGBM: one model per quantile ----------
 importance = None
@@ -92,7 +107,7 @@ for i, c in enumerate(lgbm_cols):
 actual = test["target"].to_numpy()
 rows = []
 for q in SERVICE_LEVELS:
-    for method in ["naive", "normal", "lgbm"]:
+    for method in METHODS:
         p = preds[f"{method}_{q}"]
         rows.append(
             {
@@ -126,6 +141,7 @@ cov = scores.pivot(index="quantile", columns="method", values="coverage")
 fig, ax = plt.subplots(figsize=(6, 5))
 ax.plot([0.45, 1], [0.45, 1], "k--", label="perfect")
 ax.plot(cov.index, cov["normal"], "o-", label="normal formula")
+ax.plot(cov.index, cov["history"], "o-", label="past-year quantile")
 ax.plot(cov.index, cov["lgbm"], "o-", label="LightGBM")
 ax.set_xlabel("quantile we asked for")
 ax.set_ylabel("how often real demand was below the forecast")
