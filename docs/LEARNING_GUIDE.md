@@ -152,28 +152,34 @@ A model result means nothing without something to compare against.
   It assumes demand follows a bell curve. `z` comes from the service level
   (95% gives z = 1.64). The `sqrt(10)` is because the uncertainty of a sum of 10
   independent days grows with the square root of the number of days.
+- **Past-year quantile** (called `history` in the code): take the product's 10-day
+  sales totals ending on each of the last 364 days, and read the quantile straight off
+  that list. No bell-curve assumption, so it handles skewed demand. Its weakness: it
+  treats a whole year as equally relevant, so it reacts slowly when a product's sales
+  level changes.
 
 ### Results
 
 Pinball loss (lower is better):
 
-| Quantile | Naive | Normal formula | LightGBM |
-|---|---|---|---|
-| 0.50 | 2.474 | 2.474 | 2.260 |
-| 0.90 | 2.832 | 1.524 | 1.207 |
-| 0.95 | 2.877 | 1.113 | 0.766 |
-| 0.99 | 2.912 | 0.602 | 0.236 |
+(store CA_1)
+
+| Quantile | Naive | Normal formula | Past-year quantile | LightGBM |
+|---|---|---|---|---|
+| 0.90 | 2.832 | 1.524 | 1.649 | 1.207 |
+| 0.95 | 2.877 | 1.113 | 1.038 | 0.766 |
+| 0.99 | 2.912 | 0.602 | 0.345 | 0.236 |
 
 **Calibration** asks: when you say 95%, does it happen 95% of the time?
 
-| Asked for | Normal formula | LightGBM |
-|---|---|---|
-| 0.80 | 0.732 | 0.800 |
-| 0.90 | 0.814 | 0.896 |
-| 0.95 | 0.863 | 0.946 |
-| 0.99 | 0.921 | 0.988 |
+| Asked for | Normal formula | Past-year quantile | LightGBM |
+|---|---|---|---|
+| 0.90 | 0.814 | 0.879 | 0.896 |
+| 0.95 | 0.863 | 0.927 | 0.946 |
+| 0.99 | 0.921 | 0.971 | 0.988 |
 
 LightGBM is almost exactly right. The normal formula promises 95% and delivers 86%.
+The past-year quantile is in between.
 
 **Why does the normal formula fail?** A bell curve is symmetric. Real demand for a slow
 product is not: mostly 0s and 1s, with an occasional 15. That long right tail is where
@@ -213,13 +219,35 @@ service level, plot (inventory, fill rate). A better method is higher and furthe
 
 ### Results
 
-| To reach this fill rate | Normal formula needs | LightGBM needs | Saved |
-|---|---|---|---|
-| 90% | $67,362 | $64,619 | 4.1% |
-| 95% | $91,990 | $86,003 | 6.5% |
-| 97% | $112,895 | $100,402 | 11.1% |
+Store CA_1, average inventory value needed:
+
+| To reach this fill rate | Normal formula | Past-year quantile | LightGBM | Saved vs the better baseline |
+|---|---|---|---|---|
+| 90% | $67,362 | $74,157 | $64,619 | 4.1% |
+| 95% | $91,990 | $99,710 | $86,003 | 6.5% |
+| 97% | $112,895 | $118,937 | $100,402 | 11.1% |
 
 The naive method (no safety stock) only reaches an 83% fill rate.
+
+**Does it hold in other stores?** `run_all_stores.py` repeats everything for one store
+in each state, each with its own model:
+
+| Store | 90% | 95% | 97% | LightGBM coverage at 0.95 |
+|---|---|---|---|---|
+| CA_1 | 4.1% less | 6.5% less | 11.1% less | 94.6% |
+| TX_1 | 5.9% less | 7.1% less | 7.2% less | 94.7% |
+| WI_1 | 6.4% less | 8.7% less | 10.6% less | 94.5% |
+
+(always compared with whichever baseline did better at that fill rate)
+
+**A surprise worth understanding.** The past-year quantile is *better calibrated* than
+the normal formula (92.7% vs 86.3%), yet in CA_1 and TX_1 it needs *more* inventory for
+the same fill rate. How? Calibration only says "right on average across all products".
+The past-year method is slow: for a product whose sales have dropped it still stocks for
+last year's level (wasted inventory), and for a growing product it stocks too little.
+Those errors cancel in the coverage number but both hurt in the store. The lesson:
+a good quantile forecast must be calibrated **and** sharp (specific to the current
+situation). Pinball loss measures both at once, which is why it is the main score.
 
 The gap widens at high service levels, which makes sense: that is where knowing the
 *tail* of demand matters, and the tail is exactly what the bell curve gets wrong.
@@ -240,11 +268,12 @@ the headline result.
 1. **Sales are not demand.** Empty-shelf days look like zero demand. The simulation
    replays recorded sales, so true lost sales are underestimated for every method.
 2. **Costs are assumed**, not real.
-3. **One store, 26 weeks.** Not tested on other stores or other periods.
+3. **Three stores, one 26-week period.** Not tested on other time periods, and there
+   are 10 stores in the dataset.
 4. **Simplified store**: fixed 3-day delivery, no minimum pack sizes, no shelf limits,
    no food going off.
-5. **The baseline is simple.** A stronger classical baseline (for example, using past
-   10-day totals directly instead of a bell curve) would likely close part of the gap.
+5. **The baselines are classical but not exhaustive.** Methods built for intermittent
+   demand (Croston, for example) were not tried.
 6. The improvement is modest (4 to 11%), not magic. That is realistic.
 
 ## 8. Interview questions and answers
@@ -287,9 +316,23 @@ model's gain is in how it shapes the uncertainty around it.
 Censored demand. I only see sales. Next step would be to estimate true demand on
 stockout days.
 
+**Did you try a stronger baseline than the textbook formula?**
+Yes, the quantile of each product's own 10-day totals over the past year. It was
+better calibrated than the formula but needed more inventory in two of three stores,
+because it adapts slowly. LightGBM beat the better of the two by 4 to 11% everywhere.
+
+**Does it generalise?**
+I ran three stores in three states with separate models. Savings were 4 to 11% in all
+of them and coverage at the 95% quantile was 94.5 to 94.7%.
+
+**Can a forecast be calibrated and still bad?**
+Yes. Calibration is an average over products. A method can over-stock some products
+and under-stock others and still look calibrated. You also need sharpness; pinball
+loss captures both.
+
 **What would you do next?**
-Handle censored demand, test on all 10 stores, add a stronger classical baseline, add
-pack sizes and spoilage for food.
+Handle censored demand, run all 10 stores and more time periods, try Croston-type
+baselines, add pack sizes and spoilage for food.
 
 **What is overfitting and how did you control it?**
 Memorising training data. Controlled with early stopping on a validation period,
@@ -302,20 +345,21 @@ Service level: share of weeks with no stockout. Fill rate: share of units served
 
 **In 30 seconds:**
 "I built a system that decides how much of each product a Walmart store should order
-each week. It forecasts a range of demand for 3,049 products using LightGBM quantile
-regression, turns that into order quantities, and I backtested it by simulating 26
-weeks of ordering. Compared with the textbook safety-stock formula it reached the same
-fill rate with 4 to 11% less inventory, mainly because its uncertainty estimates were
-well calibrated and the formula's were not."
+each week. It forecasts a range of demand for about 3,000 products per store using
+LightGBM quantile regression, turns that into order quantities, and I backtested it by
+simulating 26 weeks of ordering in three stores. Compared with the better of two
+classical methods it reached the same fill rate with 4 to 11% less inventory, because
+its uncertainty estimates were both calibrated and specific to each product."
 
 **Resume bullets:**
 
-- Built an end-to-end demand forecasting and inventory pipeline for 3,049 Walmart
-  products (M5 dataset, 2.8M training rows) using LightGBM quantile regression.
+- Built an end-to-end demand forecasting and inventory pipeline for ~3,000 products in
+  each of 3 Walmart stores (M5 dataset, 2.8M training rows per store) using LightGBM
+  quantile regression.
 - Achieved well-calibrated forecasts (94.6% actual coverage at the 95% quantile vs
   86.3% for the standard safety-stock formula) and 31% lower pinball loss.
-- Wrote an inventory simulator and backtested weekly ordering over 26 weeks, showing
-  the same 97% fill rate with 11% less inventory than the textbook method.
+- Wrote an inventory simulator and backtested weekly ordering over 26 weeks: same fill
+  rate with 4-11% less inventory than the better of two classical baselines, in all 3 stores.
 - Built a Streamlit dashboard to explore forecasts and simulated stock levels per product.
 
 ## 10. Make it yours
@@ -323,7 +367,7 @@ well calibrated and the formula's were not."
 You'll understand it far better (and have honest answers in interviews) if you change
 things and see what happens. Each takes minutes:
 
-1. Change `STORE` in `config.py` to `TX_1` and rerun. Do the results hold?
+1. Add a fourth store (say `CA_3`) to `STORES` in `run_all_stores.py`. Do the results hold?
 2. Change `LEAD_TIME` to 7. What happens to the inventory needed?
 3. Remove `planned_price_change` from the features. Does anything change?
 4. Remove `mean_28`. How much worse does it get?
