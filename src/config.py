@@ -1,15 +1,19 @@
 """All the settings for the project live here, so there are no magic numbers
 hidden inside the other scripts."""
 
+import os
 from pathlib import Path
+
+# ---- which slice of Walmart we work on ----
+# One store at a time (3,049 products). CA_1 is the default; run_all_stores.py
+# reruns the pipeline for other stores by setting the STORE environment variable.
+STORE = os.environ.get("STORE", "CA_1")
 
 ROOT = Path(__file__).resolve().parent.parent
 RAW = ROOT / "data" / "raw"
-PROCESSED = ROOT / "data" / "processed"
-FIGURES = ROOT / "reports" / "figures"
-
-# ---- which slice of Walmart we work on ----
-STORE = "CA_1"            # one store in California, 3,049 products
+PROCESSED = ROOT / "data" / "processed" / STORE
+FIGURES = ROOT / "reports" / "figures" / STORE
+DASHBOARD_DATA = ROOT / "dashboard" / "data"   # small result files the dashboard reads
 
 # ---- how the store restocks ----
 REVIEW_DAYS = 7           # we place an order once a week

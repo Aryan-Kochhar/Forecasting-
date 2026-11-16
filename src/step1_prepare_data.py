@@ -31,7 +31,7 @@ cal = pd.read_csv(RAW / "calendar.csv", parse_dates=["date"])
 cal = cal.iloc[: len(day_cols)]
 calendar = pd.DataFrame(
     {
-        "snap": cal["snap_CA"].to_numpy(),
+        "snap": cal[f"snap_{STORE[:2]}"].to_numpy(),   # SNAP days differ by state (CA / TX / WI)
         "event": cal["event_name_1"].notna().astype(int).to_numpy(),
     },
     index=pd.DatetimeIndex(cal["date"], name="date"),
